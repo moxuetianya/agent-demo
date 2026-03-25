@@ -1,0 +1,9 @@
+{
+  "id": 6,
+  "subject": "Backend Authentication System",
+  "description": "Implement backend authentication system including:\n- User registration endpoint\n- User login endpoint with JWT token generation\n- Password hashing and validation\n- Middleware for protected routes\n- Token refresh mechanism\n- Logout functionality",
+  "status": "pending",
+  "owner": null,
+  "blockedBy": [],
+  "blocks": []
+}

@@ -1,0 +1,20 @@
+{
+  "worktrees": [
+    {
+      "name": "auth-refactor",
+      "path": "/home/peter/project/agnet-demo/.worktrees/auth-refactor",
+      "branch": "wt/auth-refactor",
+      "task_id": 1,
+      "status": "active",
+      "created_at": 1774445288.5213335
+    },
+    {
+      "name": "ui-login",
+      "path": "/home/peter/project/agnet-demo/.worktrees/ui-login",
+      "branch": "wt/ui-login",
+      "task_id": 2,
+      "status": "active",
+      "created_at": 1774445288.544461
+    }
+  ]
+}

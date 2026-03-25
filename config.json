@@ -1,0 +1,10 @@
+{
+    "team_name": "default",
+    "members": [
+        {
+            "name": "alice",
+            "role": "coder",
+            "status": "idle"
+        }
+    ]
+}

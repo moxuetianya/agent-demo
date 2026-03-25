@@ -1,0 +1,11 @@
+{
+  "id": 1,
+  "subject": "Setup project",
+  "description": "",
+  "status": "in_progress",
+  "blockedBy": [],
+  "blocks": [],
+  "owner": "alice",
+  "worktree": "auth-refactor",
+  "updated_at": 1774445288.5217147
+}

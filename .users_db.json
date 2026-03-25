@@ -1,0 +1,10 @@
+{
+  "bob": {
+    "username": "bob",
+    "password_hash": "d376ef70f30e7a0309a6dafa62f2f80219409cf0c9eecfca6d9d64a7797fd9df",
+    "salt": "f6403f574020a16e837722590bcf95ec",
+    "email": "bob@example.com",
+    "created_at": "2026-03-25T21:08:54.923441",
+    "last_login": "2026-03-25T21:08:54.923721"
+  }
+}

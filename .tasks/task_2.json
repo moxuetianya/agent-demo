@@ -1,0 +1,11 @@
+{
+  "id": 2,
+  "subject": "Write code",
+  "description": "",
+  "status": "in_progress",
+  "blockedBy": [],
+  "blocks": [],
+  "owner": "bob",
+  "worktree": "ui-login",
+  "updated_at": 1774445288.5447795
+}

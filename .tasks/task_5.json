@@ -1,0 +1,11 @@
+{
+  "id": 5,
+  "subject": "Frontend Login Page",
+  "description": "Create login page UI with form validation, error handling, and integration with backend auth API",
+  "status": "pending",
+  "owner": "",
+  "worktree": "",
+  "blockedBy": [],
+  "created_at": 1774445042.2721736,
+  "updated_at": 1774445042.2721736
+}

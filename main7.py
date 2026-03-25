@@ -29,16 +29,31 @@ from pathlib import Path
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
+from common import (
+    setup_logging, get_logger, Colors,
+    get_conversation_logger
+)
+
+# Configure logging with colors and file output
+setup_logging()
+main_logger = get_logger("main7")
+agent_logger = get_logger("agent_loop")
+tool_logger = get_logger("tool")
+task_logger = get_logger("task")
+conv_logger = get_conversation_logger()
 
 load_dotenv(override=True)
-
+main_logger.info("Environment loaded")
 if os.getenv("ANTHROPIC_BASE_URL"):
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+    main_logger.info("Using custom ANTHROPIC_BASE_URL")
 
 WORKDIR = Path.cwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
 TASKS_DIR = WORKDIR / ".tasks"
+main_logger.info(f"Agent initialized at {WORKDIR} with model {MODEL}")
+main_logger.info(f"Tasks directory: {TASKS_DIR}")
 
 SYSTEM = f"You are a coding agent at {WORKDIR}. Use task tools to plan and track work."
 
@@ -49,6 +64,7 @@ class TaskManager:
         self.dir = tasks_dir
         self.dir.mkdir(exist_ok=True)
         self._next_id = self._max_id() + 1
+        task_logger.info(f"TaskManager initialized, next_id={self._next_id}")
 
     def _max_id(self) -> int:
         ids = [int(f.stem.split("_")[1]) for f in self.dir.glob("task_*.json")]
@@ -57,12 +73,14 @@ class TaskManager:
     def _load(self, task_id: int) -> dict:
         path = self.dir / f"task_{task_id}.json"
         if not path.exists():
+            task_logger.warning(f"Task {task_id} not found")
             raise ValueError(f"Task {task_id} not found")
         return json.loads(path.read_text())
 
     def _save(self, task: dict):
         path = self.dir / f"task_{task['id']}.json"
         path.write_text(json.dumps(task, indent=2))
+        task_logger.debug(f"Task {task['id']} saved to {path}")
 
     def create(self, subject: str, description: str = "") -> str:
         task = {
@@ -71,25 +89,33 @@ class TaskManager:
         }
         self._save(task)
         self._next_id += 1
+        task_logger.info(f"Created task #{task['id']}: {subject}")
         return json.dumps(task, indent=2)
 
     def get(self, task_id: int) -> str:
+        task_logger.info(f"Getting task #{task_id}")
         return json.dumps(self._load(task_id), indent=2)
 
     def update(self, task_id: int, status: str = None,
                add_blocked_by: list = None, add_blocks: list = None) -> str:
+        task_logger.info(f"Updating task #{task_id}: status={status}, add_blocked_by={add_blocked_by}, add_blocks={add_blocks}")
         task = self._load(task_id)
         if status:
             if status not in ("pending", "in_progress", "completed"):
+                task_logger.error(f"Invalid status: {status}")
                 raise ValueError(f"Invalid status: {status}")
             task["status"] = status
+            task_logger.info(f"Task #{task_id} status changed to {status}")
             # When a task is completed, remove it from all other tasks' blockedBy
             if status == "completed":
+                task_logger.info(f"Task #{task_id} completed, clearing dependencies")
                 self._clear_dependency(task_id)
         if add_blocked_by:
             task["blockedBy"] = list(set(task["blockedBy"] + add_blocked_by))
+            task_logger.info(f"Task #{task_id} blockedBy updated: {task['blockedBy']}")
         if add_blocks:
             task["blocks"] = list(set(task["blocks"] + add_blocks))
+            task_logger.info(f"Task #{task_id} blocks updated: {task['blocks']}")
             # Bidirectional: also update the blocked tasks' blockedBy lists
             for blocked_id in add_blocks:
                 try:
@@ -97,23 +123,29 @@ class TaskManager:
                     if task_id not in blocked["blockedBy"]:
                         blocked["blockedBy"].append(task_id)
                         self._save(blocked)
+                        task_logger.info(f"Updated task #{blocked_id} blockedBy to include #{task_id}")
                 except ValueError:
-                    pass
+                    task_logger.warning(f"Blocked task #{blocked_id} not found")
         self._save(task)
         return json.dumps(task, indent=2)
 
     def _clear_dependency(self, completed_id: int):
         """Remove completed_id from all other tasks' blockedBy lists."""
+        cleared_count = 0
         for f in self.dir.glob("task_*.json"):
             task = json.loads(f.read_text())
             if completed_id in task.get("blockedBy", []):
                 task["blockedBy"].remove(completed_id)
                 self._save(task)
+                cleared_count += 1
+                task_logger.info(f"Removed task #{completed_id} from task #{task['id']} blockedBy")
+        task_logger.info(f"Cleared {completed_id} from {cleared_count} tasks' blockedBy")
 
     def list_all(self) -> str:
         tasks = []
         for f in sorted(self.dir.glob("task_*.json")):
             tasks.append(json.loads(f.read_text()))
+        task_logger.info(f"Listing {len(tasks)} tasks")
         if not tasks:
             return "No tasks."
         lines = []
@@ -129,50 +161,67 @@ TASKS = TaskManager(TASKS_DIR)
 
 # -- Base tool implementations --
 def safe_path(p: str) -> Path:
+    tool_logger.debug(f"Resolving path: {p}")
     path = (WORKDIR / p).resolve()
     if not path.is_relative_to(WORKDIR):
+        tool_logger.warning(f"Path escapes workspace: {p}")
         raise ValueError(f"Path escapes workspace: {p}")
     return path
 
 def run_bash(command: str) -> str:
+    tool_logger.info(f"Executing bash command: {command}")
     dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
     if any(d in command for d in dangerous):
+        tool_logger.warning(f"Dangerous command blocked: {command}")
         return "Error: Dangerous command blocked"
     try:
         r = subprocess.run(command, shell=True, cwd=WORKDIR,
                            capture_output=True, text=True, timeout=120)
         out = (r.stdout + r.stderr).strip()
+        tool_logger.info(f"Command completed with return code: {r.returncode}")
         return out[:50000] if out else "(no output)"
     except subprocess.TimeoutExpired:
+        tool_logger.error("Command timed out after 120s")
         return "Error: Timeout (120s)"
 
 def run_read(path: str, limit: int = None) -> str:
+    tool_logger.info(f"Reading file: {path} (limit={limit})")
     try:
         lines = safe_path(path).read_text().splitlines()
         if limit and limit < len(lines):
             lines = lines[:limit] + [f"... ({len(lines) - limit} more)"]
-        return "\n".join(lines)[:50000]
+        result = "\n".join(lines)[:50000]
+        tool_logger.info(f"Read {len(result)} bytes from {path}")
+        return result
     except Exception as e:
+        tool_logger.error(f"Error reading {path}: {e}")
         return f"Error: {e}"
 
 def run_write(path: str, content: str) -> str:
+    tool_logger.info(f"Writing file: {path} ({len(content)} bytes)")
     try:
         fp = safe_path(path)
         fp.parent.mkdir(parents=True, exist_ok=True)
         fp.write_text(content)
+        tool_logger.info(f"Wrote {len(content)} bytes to {path}")
         return f"Wrote {len(content)} bytes"
     except Exception as e:
+        tool_logger.error(f"Error writing {path}: {e}")
         return f"Error: {e}"
 
 def run_edit(path: str, old_text: str, new_text: str) -> str:
+    tool_logger.info(f"Editing file: {path}")
     try:
         fp = safe_path(path)
         c = fp.read_text()
         if old_text not in c:
+            tool_logger.warning(f"Text not found in {path}")
             return f"Error: Text not found in {path}"
         fp.write_text(c.replace(old_text, new_text, 1))
+        tool_logger.info(f"Edited {path}")
         return f"Edited {path}"
     except Exception as e:
+        tool_logger.error(f"Error editing {path}: {e}")
         return f"Error: {e}"
 
 
@@ -207,42 +256,82 @@ TOOLS = [
 ]
 
 
-def agent_loop(messages: list):
+def agent_loop(messages: list, query_num: int = 0):
+    loop_count = 0
+    agent_logger.info("Starting agent loop")
+    conv_logger.log_llm_request(len(messages), iteration=loop_count)
+
     while True:
+        loop_count += 1
+        agent_logger.info(f"Agent loop iteration {loop_count}, calling LLM with {len(messages)} messages")
+        conv_logger.log_llm_request(len(messages), iteration=loop_count)
+        conv_logger.log_messages_sent(messages, iteration=loop_count)
+
         response = client.messages.create(
             model=MODEL, system=SYSTEM, messages=messages,
             tools=TOOLS, max_tokens=8000,
         )
+        agent_logger.info(f"LLM response received, stop_reason: {response.stop_reason}")
+
+        # Append assistant turn
         messages.append({"role": "assistant", "content": response.content})
+        conv_logger.log_assistant_message(response.content, stop_reason=response.stop_reason)
+
         if response.stop_reason != "tool_use":
+            agent_logger.info("Agent loop completed - no tool use")
             return
+
         results = []
+        tool_count = 0
         for block in response.content:
             if block.type == "tool_use":
+                tool_count += 1
                 handler = TOOL_HANDLERS.get(block.name)
+                tool_logger.info(f"Executing tool call {tool_count}: {block.name}")
                 try:
                     output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
                 except Exception as e:
+                    tool_logger.error(f"Tool execution error: {e}")
                     output = f"Error: {e}"
                 print(f"> {block.name}: {str(output)[:200]}")
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
+                conv_logger.log_tool_result(block.name, str(output), tool_id=block.id)
+
+        agent_logger.info(f"Executed {tool_count} tool(s), appending results to messages")
         messages.append({"role": "user", "content": results})
 
 
 if __name__ == "__main__":
+    main_logger.info("Starting agent demo application")
     history = []
+    query_count = 0
     while True:
+        query_count += 1
+        main_logger.info(f"Waiting for user input (query #{query_count})")
         try:
-            query = input("\033[36ms07 >> \033[0m")
+            query = input(f"{Colors.CYAN}s07 >> {Colors.RESET}")
+            main_logger.info(f"User input received: {query}")
         except (EOFError, KeyboardInterrupt):
+            main_logger.info("Interrupted, exiting")
             break
         if query.strip().lower() in ("q", "exit", ""):
+            main_logger.info("Exit command received, shutting down")
             break
+
         history.append({"role": "user", "content": query})
-        agent_loop(history)
+        conv_logger.log_user_message(query, query_num=query_count)
+        main_logger.info(f"Processing query, history now has {len(history)} messages")
+
+        agent_loop(history, query_num=query_count)
+
         response_content = history[-1]["content"]
         if isinstance(response_content, list):
             for block in response_content:
                 if hasattr(block, "text"):
+                    main_logger.info(f"Assistant response: {block.text[:100]}...")
                     print(block.text)
         print()
+        conv_logger.end_query(query_num=query_count)
+
+    main_logger.info("Agent demo application stopped")
+    main_logger.info(f"Conversation log saved to: {conv_logger.get_log_path()}")

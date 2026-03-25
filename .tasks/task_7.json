@@ -1,0 +1,9 @@
+{
+  "id": 7,
+  "subject": "Frontend Login Page",
+  "description": "Create frontend login page including:\n- Login form with email/username and password fields\n- Form validation (client-side)\n- Integration with backend auth API\n- Error handling and user feedback\n- Remember me functionality\n- Forgot password link\n- Responsive design",
+  "status": "pending",
+  "owner": null,
+  "blockedBy": [],
+  "blocks": []
+}

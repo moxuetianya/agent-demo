@@ -1,0 +1,25 @@
+[
+  {
+    "id": 1,
+    "title": "Design database schema",
+    "description": "Create tables for users and projects",
+    "status": "completed",
+    "owner": "bob"
+  },
+  {
+    "id": 2,
+    "title": "Implement user authentication",
+    "description": "Create login and registration endpoints",
+    "status": "completed",
+    "owner": "alice",
+    "dependencies": [1]
+  },
+  {
+    "id": 3,
+    "title": "Write API documentation",
+    "description": "Document all REST endpoints",
+    "status": "completed",
+    "owner": "alice",
+    "dependencies": [2]
+  }
+]

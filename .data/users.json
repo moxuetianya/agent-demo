@@ -1,0 +1,10 @@
+{
+  "alice": {
+    "username": "alice",
+    "password_hash": "2f590409bf3ef74e2ada639db2ca819785bd7c142ecf49c6e4ac5f3693b369d0",
+    "salt": "992d028103e9c8543bfba8ac4067f82b",
+    "created_at": 1774444278.8889227,
+    "last_login": 1774444278.9204905,
+    "is_active": true
+  }
+}

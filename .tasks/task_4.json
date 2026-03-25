@@ -1,0 +1,11 @@
+{
+  "id": 4,
+  "subject": "Backend Auth",
+  "description": "Implement backend authentication system including user authentication, token generation, and security middleware",
+  "status": "pending",
+  "owner": "",
+  "worktree": "",
+  "blockedBy": [],
+  "created_at": 1774445042.2717857,
+  "updated_at": 1774445042.271786
+}

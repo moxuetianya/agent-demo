@@ -5,6 +5,7 @@ Includes logging configuration, colored terminal output, and conversation loggin
 import json
 import logging
 import sys
+import inspect
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -36,11 +37,20 @@ LOGGER_COLORS = {
     "main4": Colors.BLUE,          # main4.py 主逻辑
     "main5": Colors.BLUE,          # main5.py 主逻辑
     "main6": Colors.BLUE,          # main6.py 主逻辑
+    "main7": Colors.BLUE,          # main7.py 主逻辑
+    "main8": Colors.BLUE,          # main8.py 主逻辑
+    "main9": Colors.BLUE,          # main9.py 主逻辑
+    "main10": Colors.BLUE,         # main10.py 主逻辑
+    "main11": Colors.BLUE,         # main11.py 主逻辑
+    "main12": Colors.BLUE,         # main12.py 主逻辑
+    "main_full": Colors.BLUE,      # main_full.py 主逻辑
     "agent_loop": Colors.MAGENTA,  # agent_loop 循环
     "tool": Colors.YELLOW,         # 工具调用
+    "task": Colors.CYAN,           # 任务管理
     "skill": Colors.CYAN,          # 技能加载
     "compact": Colors.CYAN,        # 上下文压缩
     "subagent": Colors.CYAN,       # 子代理
+    "background": Colors.CYAN,     # 后台任务
     "default": Colors.GREEN,       # 默认
 }
 
@@ -91,6 +101,21 @@ class ConversationLogger:
         self.current_file: Optional[Path] = None
         self.session_start = datetime.now()
         self._init_session_file()
+
+    def _get_caller_info(self) -> dict:
+        """Get caller information (file, line, function)."""
+        # Get the frame 3 levels up (skip _get_caller_info -> log method -> caller)
+        frame = inspect.currentframe()
+        try:
+            for _ in range(3):
+                if frame.f_back:
+                    frame = frame.f_back
+            filename = Path(frame.f_code.co_filename).name
+            lineno = frame.f_lineno
+            funcname = frame.f_code.co_name
+            return {"file": filename, "line": lineno, "function": funcname}
+        finally:
+            del frame
 
     def _init_session_file(self):
         """Initialize the session log file with timestamp."""
@@ -143,67 +168,113 @@ class ConversationLogger:
             return result
         return str(content)
 
-    def log_user_message(self, content: str, query_num: int = 0):
+    def _format_source(self, agent_name: str = None, caller_info: dict = None) -> str:
+        """Format source information for logging."""
+        parts = []
+        if agent_name:
+            parts.append(f"agent={agent_name}")
+        if caller_info:
+            parts.append(f"{caller_info['file']}:{caller_info['line']} ({caller_info['function']})")
+        return " | ".join(parts) if parts else ""
+
+    def log_user_message(self, content: str, query_num: int = 0, agent_name: str = None):
         """Log a user message."""
+        caller_info = self._get_caller_info()
+        source = self._format_source(agent_name, caller_info)
         self._write_separator(f"USER QUERY #{query_num}")
         # 发送 - 绿色时间戳 + 绿色箭头
         ts = datetime.now().strftime('%H:%M:%S')
-        self._write_line(f"{Colors.GREEN}[{ts}]{Colors.RESET} {Colors.GREEN}->{Colors.RESET} TO LLM (user):")
-        self._write_line(json.dumps({
+        source_str = f" [{source}]" if source else ""
+        self._write_line(f"{Colors.GREEN}[{ts}]{Colors.RESET} {Colors.GREEN}->{Colors.RESET} TO LLM (user){source_str}:")
+        data = {
             "role": "user",
-            "content": content
-        }, ensure_ascii=False, indent=2))
+            "content": content,
+        }
+        if agent_name:
+            data["agent_name"] = agent_name
+        if caller_info:
+            data["source"] = caller_info
+        self._write_line(json.dumps(data, ensure_ascii=False, indent=2))
         self._write_line("")
 
-    def log_assistant_message(self, content, stop_reason: str = None, origin = None):
+    def log_assistant_message(self, content, stop_reason: str = None, origin = None, agent_name: str = None):
         """Log an assistant message."""
+        caller_info = self._get_caller_info()
+        source = self._format_source(agent_name, caller_info)
         # 接收 - 蓝色时间戳 + 蓝色箭头
         ts = datetime.now().strftime('%H:%M:%S')
-        self._write_line(f"{Colors.BLUE}[{ts}]{Colors.RESET} {Colors.BLUE}<-{Colors.RESET} FROM LLM (assistant):")
+        source_str = f" [{source}]" if source else ""
+        self._write_line(f"{Colors.BLUE}[{ts}]{Colors.RESET} {Colors.BLUE}<-{Colors.RESET} FROM LLM (assistant){source_str}:")
         if stop_reason:
             self._write_line(f"[Stop reason: {stop_reason}]")
 
         serialized = self._serialize_content(content)
-        self._write_line(json.dumps({
+        data = {
             "role": "assistant",
-            "content": serialized
-        }, ensure_ascii=False, indent=2))
+            "content": serialized,
+        }
+        if agent_name:
+            data["agent_name"] = agent_name
+        if caller_info:
+            data["source"] = caller_info
+        self._write_line(json.dumps(data, ensure_ascii=False, indent=2))
         self._write_line("")
         self._write_line(str(origin) if origin else "")
 
-    def log_tool_result(self, tool_name: str, result: str, tool_id: str = None):
+    def log_tool_result(self, tool_name: str, result: str, tool_id: str = None, agent_name: str = None):
         """Log a tool execution result (full content, no truncation)."""
+        caller_info = self._get_caller_info()
+        source = self._format_source(agent_name, caller_info)
         # 发送 - 绿色时间戳 + 绿色箭头
         ts = datetime.now().strftime('%H:%M:%S')
-        self._write_line(f"{Colors.GREEN}[{ts}]{Colors.RESET} {Colors.GREEN}->{Colors.RESET} TO LLM (tool_result):")
+        source_str = f" [{source}]" if source else ""
+        self._write_line(f"{Colors.GREEN}[{ts}]{Colors.RESET} {Colors.GREEN}->{Colors.RESET} TO LLM (tool_result){source_str}:")
         data = {
             "type": "tool_result",
             "tool_name": tool_name,
-            "content": result
+            "content": result,
         }
         if tool_id:
             data["tool_use_id"] = tool_id
+        if agent_name:
+            data["agent_name"] = agent_name
+        if caller_info:
+            data["source"] = caller_info
         self._write_line(json.dumps(data, ensure_ascii=False, indent=2))
         self._write_line("")
 
-    def log_messages_sent(self, messages: list, iteration: int = None):
+    def log_messages_sent(self, messages: list, iteration: int = None, agent_name: str = None):
         """Log all messages sent to LLM (full content in JSON)."""
+        caller_info = self._get_caller_info()
+        source = self._format_source(agent_name, caller_info)
         prefix = f" [Iteration {iteration}]" if iteration else ""
         # 发送 - 绿色时间戳 + 绿色箭头
         ts = datetime.now().strftime('%H:%M:%S')
-        self._write_line(f"{Colors.GREEN}[{ts}]{Colors.RESET} {Colors.GREEN}->{Colors.RESET} TO LLM{prefix}:")
+        source_str = f" [{source}]" if source else ""
+        self._write_line(f"{Colors.GREEN}[{ts}]{Colors.RESET} {Colors.GREEN}->{Colors.RESET} TO LLM{prefix}{source_str}:")
         serialized = self._serialize_content(messages)
-        self._write_line(json.dumps(serialized, ensure_ascii=False, indent=2))
+        data = {
+            "messages": serialized,
+        }
+        if agent_name:
+            data["agent_name"] = agent_name
+        if caller_info:
+            data["source"] = caller_info
+        self._write_line(json.dumps(data, ensure_ascii=False, indent=2))
         self._write_line("")
 
-    def log_llm_request(self, messages_count: int, iteration: int = None):
+    def log_llm_request(self, messages_count: int, iteration: int = None, agent_name: str = None):
         """Log an LLM request."""
+        caller_info = self._get_caller_info()
+        source = self._format_source(agent_name, caller_info)
         prefix = f"[Iteration {iteration}] " if iteration else ""
-        self._write_line(f"[{datetime.now().strftime('%H:%M:%S')}] {prefix}LLM REQUEST ({messages_count} messages)")
+        source_str = f" [{source}]" if source else ""
+        self._write_line(f"[{datetime.now().strftime('%H:%M:%S')}] {prefix}LLM REQUEST ({messages_count} messages){source_str}")
 
-    def end_query(self, query_num: int = 0):
+    def end_query(self, query_num: int = 0, agent_name: str = None):
         """Mark the end of a query."""
-        self._write_separator(f"END QUERY #{query_num}")
+        agent_str = f" [agent={agent_name}]" if agent_name else ""
+        self._write_separator(f"END QUERY #{query_num}{agent_str}")
         self._write_line("")
 
     def get_log_path(self) -> str:
