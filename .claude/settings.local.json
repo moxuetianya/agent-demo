@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run:*)",
+      "Bash(echo:*)",
+      "Bash(env)",
+      "Bash(grep:*)",
+      "Bash(direnv status:*)",
+      "Bash(ls -la ~/.local/bin/python*)",
+      "Bash(ls -la ~/.my_local/bin/python*)"
+    ]
+  }
+}
