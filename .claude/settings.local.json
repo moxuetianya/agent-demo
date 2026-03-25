@@ -9,7 +9,9 @@
       "Bash(ls -la ~/.local/bin/python*)",
       "Bash(ls -la ~/.my_local/bin/python*)",
       "Bash(python3:*)",
-      "Bash(ls -lt /home/peter/project/agnet-demo/.logs/conversation_*.log)"
+      "Bash(ls -lt /home/peter/project/agnet-demo/.logs/conversation_*.log)",
+      "Bash(export SSL_CERT_FILE=/etc/ssl/certs/mitmproxy.pem)",
+      "Bash(export REQUESTS_CA_BUNDLE=/etc/ssl/certs/mitmproxy.pem)"
     ]
   }
 }

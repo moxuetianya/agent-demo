@@ -1,47 +1,45 @@
 #!/usr/bin/env python3
-# Harness: on-demand knowledge -- domain expertise, loaded when the model asks.
+# Harness: compression -- clean memory for infinite sessions.
 """
-s05_skill_loading.py - Skills
+s06_context_compact.py - Compact
 
-Two-layer skill injection that avoids bloating the system prompt:
+Three-layer compression pipeline so the agent can work forever:
 
-    Layer 1 (cheap): skill names in system prompt (~100 tokens/skill)
-    Layer 2 (on demand): full skill body in tool_result
+    Every turn:
+    +------------------+
+    | Tool call result |
+    +------------------+
+            |
+            v
+    [Layer 1: micro_compact]        (silent, every turn)
+      Replace tool_result content older than last 3
+      with "[Previous: used {tool_name}]"
+            |
+            v
+    [Check: tokens > 50000?]
+       |               |
+       no              yes
+       |               |
+       v               v
+    continue    [Layer 2: auto_compact]
+                  Save full transcript to .transcripts/
+                  Ask LLM to summarize conversation.
+                  Replace all messages with [summary].
+                        |
+                        v
+                [Layer 3: compact tool]
+                  Model calls compact -> immediate summarization.
+                  Same as auto, triggered manually.
 
-    skills/
-      pdf/
-        SKILL.md          <-- frontmatter (name, description) + body
-      code-review/
-        SKILL.md
-
-    System prompt:
-    +--------------------------------------+
-    | You are a coding agent.              |
-    | Skills available:                    |
-    |   - pdf: Process PDF files...        |  <-- Layer 1: metadata only
-    |   - code-review: Review code...      |
-    +--------------------------------------+
-
-    When model calls load_skill("pdf"):
-    +--------------------------------------+
-    | tool_result:                         |
-    | <skill>                              |
-    |   Full PDF processing instructions   |  <-- Layer 2: full body
-    |   Step 1: ...                        |
-    |   Step 2: ...                        |
-    | </skill>                             |
-    +--------------------------------------+
-
-Key insight: "Don't put everything in the system prompt. Load on demand."
+Key insight: "The agent can forget strategically and keep working forever."
 """
 
+import json
 import os
-import re
-import ssl
 import subprocess
+import time
 from pathlib import Path
 
-import httpx
 from anthropic import Anthropic
 from dotenv import load_dotenv
 from common import (
@@ -51,10 +49,10 @@ from common import (
 
 # Configure logging with colors and file output
 setup_logging()
-main_logger = get_logger("main5")
+main_logger = get_logger("main6")
 agent_logger = get_logger("agent_loop")
 tool_logger = get_logger("tool")
-skill_logger = get_logger("skill")
+compact_logger = get_logger("compact")
 conv_logger = get_conversation_logger()
 
 load_dotenv(override=True)
@@ -64,87 +62,96 @@ if os.getenv("ANTHROPIC_BASE_URL"):
     main_logger.info("Using custom ANTHROPIC_BASE_URL")
 
 WORKDIR = Path.cwd()
-
-# Create SSL context that loads system certificates
-ssl_context = ssl.create_default_context(cafile="/etc/ssl/certs/mitmproxy.pem")
-http_client = httpx.Client(verify=ssl_context)
-
-client = Anthropic(
-    base_url=os.getenv("ANTHROPIC_BASE_URL"),
-    http_client=http_client
-)
+client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
-SKILLS_DIR = WORKDIR / "skills"
 main_logger.info(f"Agent initialized at {WORKDIR} with model {MODEL}")
 
+SYSTEM = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks."
 
-# -- SkillLoader: scan skills/<name>/SKILL.md with YAML frontmatter --
-class SkillLoader:
-    def __init__(self, skills_dir: Path):
-        self.skills_dir = skills_dir
-        self.skills = {}
-        skill_logger.info(f"Initializing SkillLoader from {skills_dir}")
-        self._load_all()
-        skill_logger.info(f"Loaded {len(self.skills)} skills: {', '.join(self.skills.keys())}")
-
-    def _load_all(self):
-        if not self.skills_dir.exists():
-            skill_logger.warning(f"Skills directory not found: {self.skills_dir}")
-            return
-        for f in sorted(self.skills_dir.rglob("SKILL.md")):
-            skill_logger.debug(f"Loading skill from {f}")
-            text = f.read_text()
-            meta, body = self._parse_frontmatter(text)
-            name = meta.get("name", f.parent.name)
-            self.skills[name] = {"meta": meta, "body": body, "path": str(f)}
-            skill_logger.info(f"Loaded skill '{name}': {meta.get('description', 'No description')}")
-
-    def _parse_frontmatter(self, text: str) -> tuple:
-        """Parse YAML frontmatter between --- delimiters."""
-        match = re.match(r"^---\n(.*?)\n---\n(.*)", text, re.DOTALL)
-        if not match:
-            skill_logger.debug("No frontmatter found, using default")
-            return {}, text
-        meta = {}
-        for line in match.group(1).strip().splitlines():
-            if ":" in line:
-                key, val = line.split(":", 1)
-                meta[key.strip()] = val.strip()
-        return meta, match.group(2).strip()
-
-    def get_descriptions(self) -> str:
-        """Layer 1: short descriptions for the system prompt."""
-        if not self.skills:
-            return "(no skills available)"
-        lines = []
-        for name, skill in self.skills.items():
-            desc = skill["meta"].get("description", "No description")
-            tags = skill["meta"].get("tags", "")
-            line = f"  - {name}: {desc}"
-            if tags:
-                line += f" [{tags}]"
-            lines.append(line)
-        return "\n".join(lines)
-
-    def get_content(self, name: str) -> str:
-        """Layer 2: full skill body returned in tool_result."""
-        skill = self.skills.get(name)
-        if not skill:
-            skill_logger.warning(f"Unknown skill requested: '{name}'")
-            return f"Error: Unknown skill '{name}'. Available: {', '.join(self.skills.keys())}"
-        skill_logger.info(f"Loading skill content for '{name}' ({len(skill['body'])} bytes)")
-        return f"<skill name=\"{name}\">\n{skill['body']}\n</skill>"
+THRESHOLD = 50000
+TRANSCRIPT_DIR = WORKDIR / ".transcripts"
+KEEP_RECENT = 3
+main_logger.info(f"Context compact settings: THRESHOLD={THRESHOLD}, KEEP_RECENT={KEEP_RECENT}")
 
 
-SKILL_LOADER = SkillLoader(SKILLS_DIR)
+def estimate_tokens(messages: list) -> int:
+    """Rough token count: ~4 chars per token."""
+    return len(str(messages)) // 4
 
-# Layer 1: skill metadata injected into system prompt
-SYSTEM = f"""You are a coding agent at {WORKDIR}.
-Use load_skill to access specialized knowledge before tackling unfamiliar topics.
 
-Skills available:
-{SKILL_LOADER.get_descriptions()}"""
-main_logger.debug(f"System prompt:\n{SYSTEM}")
+# -- Layer 1: micro_compact - replace old tool results with placeholders --
+def micro_compact(messages: list) -> list:
+    # Collect (msg_index, part_index, tool_result_dict) for all tool_result entries
+    tool_results = []
+    for msg_idx, msg in enumerate(messages):
+        if msg["role"] == "user" and isinstance(msg.get("content"), list):
+            for part_idx, part in enumerate(msg["content"]):
+                if isinstance(part, dict) and part.get("type") == "tool_result":
+                    tool_results.append((msg_idx, part_idx, part))
+
+    compact_logger.debug(f"Found {len(tool_results)} tool results, keeping last {KEEP_RECENT}")
+
+    if len(tool_results) <= KEEP_RECENT:
+        return messages
+
+    # Find tool_name for each result by matching tool_use_id in prior assistant messages
+    tool_name_map = {}
+    for msg in messages:
+        if msg["role"] == "assistant":
+            content = msg.get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if hasattr(block, "type") and block.type == "tool_use":
+                        tool_name_map[block.id] = block.name
+
+    # Clear old results (keep last KEEP_RECENT)
+    to_clear = tool_results[:-KEEP_RECENT]
+    cleared_count = 0
+    for _, _, result in to_clear:
+        if isinstance(result.get("content"), str) and len(result["content"]) > 100:
+            tool_id = result.get("tool_use_id", "")
+            tool_name = tool_name_map.get(tool_id, "unknown")
+            result["content"] = f"[Previous: used {tool_name}]"
+            cleared_count += 1
+
+    compact_logger.info(f"micro_compact: cleared {cleared_count} old tool results, kept last {KEEP_RECENT}")
+    return messages
+
+
+# -- Layer 2: auto_compact - save transcript, summarize, replace messages --
+def auto_compact(messages: list) -> list:
+    compact_logger.info("auto_compact triggered - saving transcript and summarizing")
+
+    # Save full transcript to disk
+    TRANSCRIPT_DIR.mkdir(exist_ok=True)
+    transcript_path = TRANSCRIPT_DIR / f"transcript_{int(time.time())}.jsonl"
+    with open(transcript_path, "w") as f:
+        for msg in messages:
+            f.write(json.dumps(msg, default=str) + "\n")
+
+    compact_logger.info(f"Transcript saved to {transcript_path}")
+    main_logger.info(f"[transcript saved: {transcript_path}]")
+
+    # Ask LLM to summarize
+    conversation_text = json.dumps(messages, default=str)[:80000]
+    compact_logger.info(f"Requesting summary from LLM ({len(conversation_text)} chars)")
+
+    response = client.messages.create(
+        model=MODEL,
+        messages=[{"role": "user", "content":
+            "Summarize this conversation for continuity. Include: "
+            "1) What was accomplished, 2) Current state, 3) Key decisions made. "
+            "Be concise but preserve critical details.\n\n" + conversation_text}],
+        max_tokens=2000,
+    )
+    summary = response.content[0].text
+    compact_logger.info(f"Summary received: {len(summary)} chars")
+
+    # Replace all messages with compressed summary
+    return [
+        {"role": "user", "content": f"[Conversation compressed. Transcript: {transcript_path}]\n\n{summary}"},
+        {"role": "assistant", "content": "Understood. I have the context from the summary. Continuing."},
+    ]
 
 
 # -- Tool implementations --
@@ -218,7 +225,7 @@ TOOL_HANDLERS = {
     "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
     "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
     "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
-    "load_skill": lambda **kw: SKILL_LOADER.get_content(kw["name"]),
+    "compact":    lambda **kw: "Manual compression requested.",
 }
 
 TOOLS = [
@@ -230,19 +237,34 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
     {"name": "edit_file", "description": "Replace exact text in file.",
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
-    {"name": "load_skill", "description": "Load specialized knowledge by name.",
-     "input_schema": {"type": "object", "properties": {"name": {"type": "string", "description": "Skill name to load"}}, "required": ["name"]}},
+    {"name": "compact", "description": "Trigger manual conversation compression.",
+     "input_schema": {"type": "object", "properties": {"focus": {"type": "string", "description": "What to preserve in the summary"}}}},
 ]
 
 
 def agent_loop(messages: list, query_num: int = 0):
     loop_count = 0
     agent_logger.info("Starting agent loop")
-    conv_logger.log_llm_request(len(messages), iteration=loop_count)
 
     while True:
         loop_count += 1
-        agent_logger.info(f"Agent loop iteration {loop_count}, calling LLM with {len(messages)} messages")
+        agent_logger.info(f"Agent loop iteration {loop_count}")
+
+        # Layer 1: micro_compact before each LLM call
+        compact_logger.debug("Applying micro_compact")
+        micro_compact(messages)
+
+        # Layer 2: auto_compact if token estimate exceeds threshold
+        token_estimate = estimate_tokens(messages)
+        agent_logger.info(f"Estimated tokens: {token_estimate}")
+
+        if token_estimate > THRESHOLD:
+            compact_logger.warning(f"Token estimate {token_estimate} exceeds threshold {THRESHOLD}, triggering auto_compact")
+            main_logger.info("[auto_compact triggered]")
+            messages[:] = auto_compact(messages)
+            token_estimate = estimate_tokens(messages)
+            compact_logger.info(f"After auto_compact: {token_estimate} estimated tokens")
+
         conv_logger.log_llm_request(len(messages), iteration=loop_count)
         conv_logger.log_messages_sent(messages, iteration=loop_count)
 
@@ -252,7 +274,6 @@ def agent_loop(messages: list, query_num: int = 0):
         )
         agent_logger.info(f"LLM response received, stop_reason: {response.stop_reason}")
 
-        # Append assistant turn
         messages.append({"role": "assistant", "content": response.content})
         conv_logger.log_assistant_message(response.content, stop_reason=response.stop_reason)
 
@@ -261,23 +282,35 @@ def agent_loop(messages: list, query_num: int = 0):
             return
 
         results = []
+        manual_compact = False
         tool_count = 0
         for block in response.content:
             if block.type == "tool_use":
                 tool_count += 1
-                handler = TOOL_HANDLERS.get(block.name)
-                tool_logger.info(f"Executing tool call {tool_count}: {block.name}")
-                try:
-                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                except Exception as e:
-                    tool_logger.error(f"Tool execution error: {e}")
-                    output = f"Error: {e}"
+                if block.name == "compact":
+                    compact_logger.info("Manual compact requested by model")
+                    manual_compact = True
+                    output = "Compressing..."
+                else:
+                    handler = TOOL_HANDLERS.get(block.name)
+                    tool_logger.info(f"Executing tool call {tool_count}: {block.name}")
+                    try:
+                        output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
+                    except Exception as e:
+                        tool_logger.error(f"Tool execution error: {e}")
+                        output = f"Error: {e}"
                 print(f"> {block.name}: {str(output)[:200]}")
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
                 conv_logger.log_tool_result(block.name, str(output), tool_id=block.id)
 
         agent_logger.info(f"Executed {tool_count} tool(s), appending results to messages")
         messages.append({"role": "user", "content": results})
+
+        # Layer 3: manual compact triggered by the compact tool
+        if manual_compact:
+            compact_logger.info("Applying manual compact")
+            main_logger.info("[manual compact]")
+            messages[:] = auto_compact(messages)
 
 
 if __name__ == "__main__":
@@ -288,7 +321,7 @@ if __name__ == "__main__":
         query_count += 1
         main_logger.info(f"Waiting for user input (query #{query_count})")
         try:
-            query = input(f"{Colors.CYAN}s05 >> {Colors.RESET}")
+            query = input(f"{Colors.CYAN}s06 >> {Colors.RESET}")
             main_logger.info(f"User input received: {query}")
         except (EOFError, KeyboardInterrupt):
             main_logger.info("Interrupted, exiting")

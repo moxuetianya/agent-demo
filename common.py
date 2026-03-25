@@ -34,8 +34,12 @@ LOGGER_COLORS = {
     "main2": Colors.BLUE,          # main2.py 主逻辑
     "main3": Colors.BLUE,          # main3.py 主逻辑
     "main4": Colors.BLUE,          # main4.py 主逻辑
+    "main5": Colors.BLUE,          # main5.py 主逻辑
+    "main6": Colors.BLUE,          # main6.py 主逻辑
     "agent_loop": Colors.MAGENTA,  # agent_loop 循环
     "tool": Colors.YELLOW,         # 工具调用
+    "skill": Colors.CYAN,          # 技能加载
+    "compact": Colors.CYAN,        # 上下文压缩
     "subagent": Colors.CYAN,       # 子代理
     "default": Colors.GREEN,       # 默认
 }
