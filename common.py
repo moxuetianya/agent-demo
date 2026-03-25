@@ -23,7 +23,12 @@ class Colors:
     WHITE = "\033[37m"
     GRAY = "\033[90m"
 
-# Logger name -> color mapping
+# Colors for message direction
+DIRECTION_COLORS = {
+    "send": Colors.GREEN,      # -> TO LLM (发送)
+    "receive": Colors.BLUE,    # <- FROM LLM (接收)
+    "timestamp": Colors.GRAY,  # 时间戳
+}
 LOGGER_COLORS = {
     "main": Colors.BLUE,           # main.py 主逻辑
     "main2": Colors.BLUE,          # main2.py 主逻辑
@@ -137,7 +142,9 @@ class ConversationLogger:
     def log_user_message(self, content: str, query_num: int = 0):
         """Log a user message."""
         self._write_separator(f"USER QUERY #{query_num}")
-        self._write_line(f"[{datetime.now().strftime('%H:%M:%S')}] -> TO LLM (user):")
+        # 发送 - 绿色时间戳 + 绿色箭头
+        ts = datetime.now().strftime('%H:%M:%S')
+        self._write_line(f"{Colors.GREEN}[{ts}]{Colors.RESET} {Colors.GREEN}->{Colors.RESET} TO LLM (user):")
         self._write_line(json.dumps({
             "role": "user",
             "content": content
@@ -146,7 +153,9 @@ class ConversationLogger:
 
     def log_assistant_message(self, content, stop_reason: str = None, origin = None):
         """Log an assistant message."""
-        self._write_line(f"[{datetime.now().strftime('%H:%M:%S')}] <- FROM LLM (assistant):")
+        # 接收 - 蓝色时间戳 + 蓝色箭头
+        ts = datetime.now().strftime('%H:%M:%S')
+        self._write_line(f"{Colors.BLUE}[{ts}]{Colors.RESET} {Colors.BLUE}<-{Colors.RESET} FROM LLM (assistant):")
         if stop_reason:
             self._write_line(f"[Stop reason: {stop_reason}]")
 
@@ -160,7 +169,9 @@ class ConversationLogger:
 
     def log_tool_result(self, tool_name: str, result: str, tool_id: str = None):
         """Log a tool execution result (full content, no truncation)."""
-        self._write_line(f"[{datetime.now().strftime('%H:%M:%S')}] -> TO LLM (tool_result):")
+        # 发送 - 绿色时间戳 + 绿色箭头
+        ts = datetime.now().strftime('%H:%M:%S')
+        self._write_line(f"{Colors.GREEN}[{ts}]{Colors.RESET} {Colors.GREEN}->{Colors.RESET} TO LLM (tool_result):")
         data = {
             "type": "tool_result",
             "tool_name": tool_name,
@@ -174,7 +185,9 @@ class ConversationLogger:
     def log_messages_sent(self, messages: list, iteration: int = None):
         """Log all messages sent to LLM (full content in JSON)."""
         prefix = f" [Iteration {iteration}]" if iteration else ""
-        self._write_line(f"[{datetime.now().strftime('%H:%M:%S')}] -> TO LLM{prefix}:")
+        # 发送 - 绿色时间戳 + 绿色箭头
+        ts = datetime.now().strftime('%H:%M:%S')
+        self._write_line(f"{Colors.GREEN}[{ts}]{Colors.RESET} {Colors.GREEN}->{Colors.RESET} TO LLM{prefix}:")
         serialized = self._serialize_content(messages)
         self._write_line(json.dumps(serialized, ensure_ascii=False, indent=2))
         self._write_line("")
