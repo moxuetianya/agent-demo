@@ -2,6 +2,7 @@
 Common utilities for the agent demo.
 Includes logging configuration, colored terminal output, and conversation logging.
 """
+import json
 import logging
 import sys
 from datetime import datetime
@@ -26,6 +27,7 @@ class Colors:
 LOGGER_COLORS = {
     "main": Colors.BLUE,           # main.py 主逻辑
     "main2": Colors.BLUE,          # main2.py 主逻辑
+    "main3": Colors.BLUE,          # main3.py 主逻辑
     "agent_loop": Colors.MAGENTA,  # agent_loop 循环
     "tool": Colors.YELLOW,         # 工具调用
     "default": Colors.GREEN,       # 默认
@@ -70,7 +72,7 @@ class ColoredFormatter(logging.Formatter):
         return result
 
 class ConversationLogger:
-    """Logs conversation messages to a file for review."""
+    """Logs conversation messages to a file for review in JSON format."""
 
     def __init__(self, log_dir: str = ".logs"):
         self.log_dir = Path(log_dir)
@@ -101,45 +103,78 @@ class ConversationLogger:
             with open(self.current_file, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
 
+    def _serialize_content(self, content):
+        """Serialize content to JSON-serializable format."""
+        if content is None:
+            return None
+        if isinstance(content, (str, int, float, bool, dict)):
+            return content
+        if isinstance(content, list):
+            result = []
+            for item in content:
+                if hasattr(item, '__dict__'):
+                    # Convert object to dict
+                    result.append({
+                        k: str(v) if not isinstance(v, (str, int, float, bool, list, dict, type(None))) else v
+                        for k, v in item.__dict__.items()
+                        if not k.startswith('_')
+                    })
+                elif hasattr(item, 'type'):
+                    # Handle anthropic message blocks
+                    obj = {"type": item.type}
+                    for k in dir(item):
+                        if not k.startswith('_') and hasattr(item, k):
+                            v = getattr(item, k)
+                            if not callable(v):
+                                obj[k] = str(v) if not isinstance(v, (str, int, float, bool, list, dict, type(None))) else v
+                    result.append(obj)
+                else:
+                    result.append(str(item))
+            return result
+        return str(content)
+
     def log_user_message(self, content: str, query_num: int = 0):
         """Log a user message."""
         self._write_separator(f"USER QUERY #{query_num}")
-        self._write_line(f"[{datetime.now().strftime('%H:%M:%S')}] USER:")
-        self._write_line(content)
+        self._write_line(f"[{datetime.now().strftime('%H:%M:%S')}] -> TO LLM (user):")
+        self._write_line(json.dumps({
+            "role": "user",
+            "content": content
+        }, ensure_ascii=False, indent=2))
         self._write_line("")
 
-    def log_assistant_message(self, content, query_num: int = 0, stop_reason: str = None):
+    def log_assistant_message(self, content, stop_reason: str = None):
         """Log an assistant message."""
-        self._write_line(f"[{datetime.now().strftime('%H:%M:%S')}] ASSISTANT:")
+        self._write_line(f"[{datetime.now().strftime('%H:%M:%S')}] <- FROM LLM (assistant):")
         if stop_reason:
             self._write_line(f"[Stop reason: {stop_reason}]")
 
-        # Handle different content types (anthropic message blocks)
-        if isinstance(content, list):
-            for block in content:
-                if hasattr(block, 'type'):
-                    if block.type == 'text':
-                        self._write_line(f"[Text] {block.text}")
-                    elif block.type == 'tool_use':
-                        self._write_line(f"[Tool Use] {block.name}: {block.input}")
-                    else:
-                        self._write_line(f"[{block.type}] {block}")
-                else:
-                    self._write_line(str(block))
-        else:
-            self._write_line(str(content))
+        serialized = self._serialize_content(content)
+        self._write_line(json.dumps({
+            "role": "assistant",
+            "content": serialized
+        }, ensure_ascii=False, indent=2))
         self._write_line("")
 
     def log_tool_result(self, tool_name: str, result: str, tool_id: str = None):
-        """Log a tool execution result."""
-        self._write_line(f"[{datetime.now().strftime('%H:%M:%S')}] TOOL RESULT ({tool_name}):")
+        """Log a tool execution result (full content, no truncation)."""
+        self._write_line(f"[{datetime.now().strftime('%H:%M:%S')}] -> TO LLM (tool_result):")
+        data = {
+            "type": "tool_result",
+            "tool_name": tool_name,
+            "content": result
+        }
         if tool_id:
-            self._write_line(f"[Tool ID: {tool_id}]")
-        # Truncate very long results
-        result_str = str(result)
-        if len(result_str) > 5000:
-            result_str = result_str[:2500] + f"\n... [truncated {len(result_str) - 5000} chars] ...\n" + result_str[-2500:]
-        self._write_line(result_str)
+            data["tool_use_id"] = tool_id
+        self._write_line(json.dumps(data, ensure_ascii=False, indent=2))
+        self._write_line("")
+
+    def log_messages_sent(self, messages: list, iteration: int = None):
+        """Log all messages sent to LLM (full content in JSON)."""
+        prefix = f" [Iteration {iteration}]" if iteration else ""
+        self._write_line(f"[{datetime.now().strftime('%H:%M:%S')}] -> TO LLM{prefix}:")
+        serialized = self._serialize_content(messages)
+        self._write_line(json.dumps(serialized, ensure_ascii=False, indent=2))
         self._write_line("")
 
     def log_llm_request(self, messages_count: int, iteration: int = None):
