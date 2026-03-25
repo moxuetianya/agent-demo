@@ -1,35 +1,39 @@
 #!/usr/bin/env python3
 """
-s02_tool_use.py - Tools
-The agent loop from s01 didn't change. We just added tools to the array
-and a dispatch map to route calls.
-    +----------+      +-------+      +------------------+
-    |   User   | ---> |  LLM  | ---> | Tool Dispatch    |
-    |  prompt  |      |       |      | {                |
-    +----------+      +---+---+      |   bash: run_bash |
-                          ^          |   read: run_read |
-                          |          |   write: run_wr  |
-                          +----------+   edit: run_edit |
-                          tool_result| }                |
-                                     +------------------+
-Key insight: "The loop didn't change at all. I just added tools."
+s04_subagent.py - Subagents
+Spawn a child agent with fresh messages=[]. The child works in its own
+context, sharing the filesystem, then returns only a summary to the parent.
+    Parent agent                     Subagent
+    +------------------+             +------------------+
+    | messages=[...]   |             | messages=[]      |  <-- fresh
+    |                  |  dispatch   |                  |
+    | tool: task       | ---------->| while tool_use:  |
+    |   prompt="..."   |            |   call tools     |
+    |   description="" |            |   append results |
+    |                  |  summary   |                  |
+    |   result = "..." | <--------- | return last text |
+    +------------------+             +------------------+
+              |
+    Parent context stays clean.
+    Subagent context is discarded.
+Key insight: "Process isolation gives context isolation for free."
 """
 import os
 import subprocess
-import sys
 from pathlib import Path
 from anthropic import Anthropic
 from dotenv import load_dotenv
 from common import (
-    setup_logging, get_logger, print_command, Colors,
+    setup_logging, get_logger, Colors,
     get_conversation_logger
 )
 
 # Configure logging with colors and file output
 setup_logging()
-main_logger = get_logger("main2")
+main_logger = get_logger("main4")
 agent_logger = get_logger("agent_loop")
 tool_logger = get_logger("tool")
+subagent_logger = get_logger("subagent")
 conv_logger = get_conversation_logger()
 
 load_dotenv(override=True)
@@ -41,9 +45,11 @@ if os.getenv("ANTHROPIC_BASE_URL"):
 WORKDIR = Path.cwd()
 client = Anthropic(base_url=os.getenv("ANTHROPIC_BASE_URL"))
 MODEL = os.environ["MODEL_ID"]
-SYSTEM = f"You are a coding agent at {WORKDIR}. Use tools to solve tasks. Act, don't explain."
+SYSTEM = f"You are a coding agent at {WORKDIR}. Use the task tool to delegate exploration or subtasks."
+SUBAGENT_SYSTEM = f"You are a coding subagent at {WORKDIR}. Complete the given task, then summarize your findings."
 main_logger.info(f"Agent initialized at {WORKDIR} with model {MODEL}")
 
+# -- Tool implementations shared by parent and child --
 def safe_path(p: str) -> Path:
     tool_logger.debug(f"Resolving path: {p}")
     path = (WORKDIR / p).resolve()
@@ -71,12 +77,11 @@ def run_bash(command: str) -> str:
 def run_read(path: str, limit: int = None) -> str:
     tool_logger.info(f"Reading file: {path} (limit={limit})")
     try:
-        text = safe_path(path).read_text()
-        lines = text.splitlines()
+        lines = safe_path(path).read_text().splitlines()
         if limit and limit < len(lines):
-            lines = lines[:limit] + [f"... ({len(lines) - limit} more lines)"]
+            lines = lines[:limit] + [f"... ({len(lines) - limit} more)"]
         result = "\n".join(lines)[:50000]
-        tool_logger.info(f"Read {len(text)} bytes from {path}")
+        tool_logger.info(f"Read {len(result)} bytes from {path}")
         return result
     except Exception as e:
         tool_logger.error(f"Error reading {path}: {e}")
@@ -89,7 +94,7 @@ def run_write(path: str, content: str) -> str:
         fp.parent.mkdir(parents=True, exist_ok=True)
         fp.write_text(content)
         tool_logger.info(f"Wrote {len(content)} bytes to {path}")
-        return f"Wrote {len(content)} bytes to {path}"
+        return f"Wrote {len(content)} bytes"
     except Exception as e:
         tool_logger.error(f"Error writing {path}: {e}")
         return f"Error: {e}"
@@ -109,14 +114,15 @@ def run_edit(path: str, old_text: str, new_text: str) -> str:
         tool_logger.error(f"Error editing {path}: {e}")
         return f"Error: {e}"
 
-# -- The dispatch map: {tool_name: handler} --
 TOOL_HANDLERS = {
     "bash":       lambda **kw: run_bash(kw["command"]),
     "read_file":  lambda **kw: run_read(kw["path"], kw.get("limit")),
     "write_file": lambda **kw: run_write(kw["path"], kw["content"]),
     "edit_file":  lambda **kw: run_edit(kw["path"], kw["old_text"], kw["new_text"]),
 }
-TOOLS = [
+
+# Child gets all base tools except task (no recursive spawning)
+CHILD_TOOLS = [
     {"name": "bash", "description": "Run a shell command.",
      "input_schema": {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}},
     {"name": "read_file", "description": "Read file contents.",
@@ -125,6 +131,54 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}},
     {"name": "edit_file", "description": "Replace exact text in file.",
      "input_schema": {"type": "object", "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}},
+]
+
+# -- Subagent: fresh context, filtered tools, summary-only return --
+def run_subagent(prompt: str) -> str:
+    subagent_logger.info(f"Starting subagent with prompt: {prompt[:100]}...")
+    sub_messages = [{"role": "user", "content": prompt}]  # fresh context
+    subagent_logger.info("Subagent initialized with fresh context")
+
+    for round_num in range(30):  # safety limit
+        subagent_logger.info(f"Subagent round {round_num + 1}, calling LLM")
+
+        response = client.messages.create(
+            model=MODEL, system=SUBAGENT_SYSTEM, messages=sub_messages,
+            tools=CHILD_TOOLS, max_tokens=8000,
+        )
+        subagent_logger.info(f"Subagent received response, stop_reason: {response.stop_reason}")
+
+        sub_messages.append({"role": "assistant", "content": response.content})
+
+        if response.stop_reason != "tool_use":
+            subagent_logger.info("Subagent completed - no tool use")
+            break
+
+        results = []
+        tool_count = 0
+        for block in response.content:
+            if block.type == "tool_use":
+                tool_count += 1
+                subagent_logger.info(f"Subagent executing tool: {block.name}")
+                handler = TOOL_HANDLERS.get(block.name)
+                output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
+                subagent_logger.info(f"Subagent tool result: {str(output)[:100]}...")
+                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)[:50000]})
+
+        subagent_logger.info(f"Subagent executed {tool_count} tool(s)")
+        sub_messages.append({"role": "user", "content": results})
+    else:
+        subagent_logger.warning("Subagent hit safety limit (30 rounds)")
+
+    # Only the final text returns to the parent -- child context is discarded
+    summary = "".join(b.text for b in response.content if hasattr(b, "text")) or "(no summary)"
+    subagent_logger.info(f"Subagent returning summary: {summary[:200]}...")
+    return summary
+
+# -- Parent tools: base tools + task dispatcher --
+PARENT_TOOLS = CHILD_TOOLS + [
+    {"name": "task", "description": "Spawn a subagent with fresh context. It shares the filesystem but not conversation history.",
+     "input_schema": {"type": "object", "properties": {"prompt": {"type": "string"}, "description": {"type": "string", "description": "Short description of the task"}}, "required": ["prompt"]}},
 ]
 
 def agent_loop(messages: list, query_num: int = 0):
@@ -136,18 +190,17 @@ def agent_loop(messages: list, query_num: int = 0):
         loop_count += 1
         agent_logger.info(f"Agent loop iteration {loop_count}, calling LLM with {len(messages)} messages")
         conv_logger.log_llm_request(len(messages), iteration=loop_count)
-        # Log full messages being sent to LLM
         conv_logger.log_messages_sent(messages, iteration=loop_count)
 
         response = client.messages.create(
             model=MODEL, system=SYSTEM, messages=messages,
-            tools=TOOLS, max_tokens=8000,
+            tools=PARENT_TOOLS, max_tokens=8000,
         )
         agent_logger.info(f"LLM response received, stop_reason: {response.stop_reason}")
 
         # Append assistant turn
         messages.append({"role": "assistant", "content": response.content})
-        conv_logger.log_assistant_message(response.content, stop_reason=response.stop_reason, origin=response)
+        conv_logger.log_assistant_message(response.content, stop_reason=response.stop_reason)
 
         if response.stop_reason != "tool_use":
             agent_logger.info("Agent loop completed - no tool use")
@@ -158,13 +211,19 @@ def agent_loop(messages: list, query_num: int = 0):
         for block in response.content:
             if block.type == "tool_use":
                 tool_count += 1
-                handler = TOOL_HANDLERS.get(block.name)
-                tool_logger.info(f"Executing tool call {tool_count}: {block.name}")
-                output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                print_command(f"{block.name}: {output[:200]}")
-                results.append({"type": "tool_result", "tool_use_id": block.id, "content": output})
-                conv_logger.log_tool_result(block.name, output, tool_id=block.id)
-                print(str(response))
+                if block.name == "task":
+                    desc = block.input.get("description", "subtask")
+                    agent_logger.info(f"Spawning subagent for task: {desc}")
+                    print(f"{Colors.MAGENTA}> task ({desc}): {block.input['prompt'][:80]}{Colors.RESET}")
+                    output = run_subagent(block.input["prompt"])
+                    agent_logger.info(f"Subagent returned: {str(output)[:100]}...")
+                else:
+                    handler = TOOL_HANDLERS.get(block.name)
+                    tool_logger.info(f"Executing tool call {tool_count}: {block.name}")
+                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
+                print(f"  {str(output)[:200]}")
+                results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)})
+                conv_logger.log_tool_result(block.name, str(output), tool_id=block.id)
 
         agent_logger.info(f"Executed {tool_count} tool(s), appending results to messages")
         messages.append({"role": "user", "content": results})
@@ -177,7 +236,7 @@ if __name__ == "__main__":
         query_count += 1
         main_logger.info(f"Waiting for user input (query #{query_count})")
         try:
-            query = input(f"{Colors.CYAN}s02 >> {Colors.RESET}")
+            query = input(f"{Colors.CYAN}s04 >> {Colors.RESET}")
             main_logger.info(f"User input received: {query}")
         except (EOFError, KeyboardInterrupt):
             main_logger.info("Interrupted, exiting")

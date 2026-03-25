@@ -28,8 +28,10 @@ LOGGER_COLORS = {
     "main": Colors.BLUE,           # main.py 主逻辑
     "main2": Colors.BLUE,          # main2.py 主逻辑
     "main3": Colors.BLUE,          # main3.py 主逻辑
+    "main4": Colors.BLUE,          # main4.py 主逻辑
     "agent_loop": Colors.MAGENTA,  # agent_loop 循环
     "tool": Colors.YELLOW,         # 工具调用
+    "subagent": Colors.CYAN,       # 子代理
     "default": Colors.GREEN,       # 默认
 }
 
@@ -107,29 +109,28 @@ class ConversationLogger:
         """Serialize content to JSON-serializable format."""
         if content is None:
             return None
-        if isinstance(content, (str, int, float, bool, dict)):
+        if isinstance(content, (str, int, float, bool)):
             return content
+        if isinstance(content, dict):
+            return {k: self._serialize_content(v) for k, v in content.items()}
         if isinstance(content, list):
-            result = []
-            for item in content:
-                if hasattr(item, '__dict__'):
-                    # Convert object to dict
-                    result.append({
-                        k: str(v) if not isinstance(v, (str, int, float, bool, list, dict, type(None))) else v
-                        for k, v in item.__dict__.items()
-                        if not k.startswith('_')
-                    })
-                elif hasattr(item, 'type'):
-                    # Handle anthropic message blocks
-                    obj = {"type": item.type}
-                    for k in dir(item):
-                        if not k.startswith('_') and hasattr(item, k):
-                            v = getattr(item, k)
-                            if not callable(v):
-                                obj[k] = str(v) if not isinstance(v, (str, int, float, bool, list, dict, type(None))) else v
-                    result.append(obj)
-                else:
-                    result.append(str(item))
+            return [self._serialize_content(item) for item in content]
+        # Handle objects with attributes (like anthropic message blocks)
+        if hasattr(content, '__dict__'):
+            result = {}
+            for k, v in content.__dict__.items():
+                if not k.startswith('_'):
+                    result[k] = self._serialize_content(v)
+            # Also include type if available
+            if hasattr(content, 'type'):
+                result['type'] = content.type
+            return result
+        # Handle objects with type attribute but no __dict__
+        if hasattr(content, 'type'):
+            result = {'type': content.type}
+            for attr in ['text', 'name', 'input', 'id', 'content', 'tool_use_id']:
+                if hasattr(content, attr):
+                    result[attr] = self._serialize_content(getattr(content, attr))
             return result
         return str(content)
 
@@ -143,7 +144,7 @@ class ConversationLogger:
         }, ensure_ascii=False, indent=2))
         self._write_line("")
 
-    def log_assistant_message(self, content, stop_reason: str = None):
+    def log_assistant_message(self, content, stop_reason: str = None, origin = None):
         """Log an assistant message."""
         self._write_line(f"[{datetime.now().strftime('%H:%M:%S')}] <- FROM LLM (assistant):")
         if stop_reason:
@@ -155,6 +156,7 @@ class ConversationLogger:
             "content": serialized
         }, ensure_ascii=False, indent=2))
         self._write_line("")
+        self._write_line(str(origin) if origin else "")
 
     def log_tool_result(self, tool_name: str, result: str, tool_id: str = None):
         """Log a tool execution result (full content, no truncation)."""

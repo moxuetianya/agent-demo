@@ -8,7 +8,8 @@
       "Bash(direnv status:*)",
       "Bash(ls -la ~/.local/bin/python*)",
       "Bash(ls -la ~/.my_local/bin/python*)",
-      "Bash(python3:*)"
+      "Bash(python3:*)",
+      "Bash(ls -lt /home/peter/project/agnet-demo/.logs/conversation_*.log)"
     ]
   }
 }
