@@ -20,20 +20,14 @@ policy, hooks, and lifecycle controls on top.
 """
 import os
 import subprocess
-import logging
 import sys
 from anthropic import Anthropic
 from dotenv import load_dotenv
+from common import setup_logging, get_logger, print_command, Colors
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
+# Configure logging with colors
+setup_logging()
+logger = get_logger(__name__)
 load_dotenv(override=True)
 if os.getenv("ANTHROPIC_BASE_URL"):
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
@@ -89,7 +83,7 @@ def agent_loop(messages: list):
             if block.type == "tool_use":
                 tool_count += 1
                 logger.info(f"Executing tool call {tool_count}: {block.input['command']}")
-                print(f"\033[33m$ {block.input['command']}\033[0m")
+                print_command(block.input['command'])
                 output = run_bash(block.input["command"])
                 print(output[:200])
                 results.append({"type": "tool_result", "tool_use_id": block.id,
@@ -104,7 +98,7 @@ if __name__ == "__main__":
         query_count += 1
         logger.info(f"Waiting for user input (query #{query_count})")
         try:
-            query = input("\033[36ms01 >> \033[0m")
+            query = input(f"{Colors.CYAN}s01 >> {Colors.RESET}")
             logger.info(f"User input received: {query}")
         except (EOFError, KeyboardInterrupt):
             logger.info("Interrupted, exiting")

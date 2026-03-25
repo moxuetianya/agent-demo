@@ -16,21 +16,15 @@ Key insight: "The loop didn't change at all. I just added tools."
 """
 import os
 import subprocess
-import logging
 import sys
 from pathlib import Path
 from anthropic import Anthropic
 from dotenv import load_dotenv
+from common import setup_logging, get_logger, print_command, Colors
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger(__name__)
+# Configure logging with colors
+setup_logging()
+logger = get_logger(__name__)
 load_dotenv(override=True)
 logger.info("Environment loaded")
 if os.getenv("ANTHROPIC_BASE_URL"):
@@ -143,7 +137,7 @@ def agent_loop(messages: list):
                 handler = TOOL_HANDLERS.get(block.name)
                 logger.info(f"Executing tool call {tool_count}: {block.name}")
                 output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
-                print(f"> {block.name}: {output[:200]}")
+                print_command(f"{block.name}: {output[:200]}")
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": output})
         logger.info(f"Executed {tool_count} tool(s), appending results to messages")
         messages.append({"role": "user", "content": results})
@@ -155,7 +149,7 @@ if __name__ == "__main__":
         query_count += 1
         logger.info(f"Waiting for user input (query #{query_count})")
         try:
-            query = input("\033[36ms02 >> \033[0m")
+            query = input(f"{Colors.CYAN}s02 >> {Colors.RESET}")
             logger.info(f"User input received: {query}")
         except (EOFError, KeyboardInterrupt):
             logger.info("Interrupted, exiting")
